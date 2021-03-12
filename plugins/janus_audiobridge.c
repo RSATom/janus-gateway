@@ -1050,7 +1050,9 @@ static struct janus_json_parameter stop_rtp_forward_parameters[] = {
 static struct janus_json_parameter play_file_parameters[] = {
 	{"filename", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
 	{"file_id", JSON_STRING, 0},
-	{"loop", JANUS_JSON_BOOL, 0}
+	{"loop", JANUS_JSON_BOOL, 0},
+	{"to", JSON_STRING, 0},
+	{"exclude", JSON_STRING, 0}
 };
 static struct janus_json_parameter checkstop_file_parameters[] = {
 	{"file_id", JSON_STRING, JANUS_JSON_PARAM_REQUIRED}
@@ -1154,6 +1156,8 @@ typedef struct janus_audiobridge_file {
 	char *oggbuf;
 	gboolean started, loop;
 	gint state, headers;
+	char* to;
+	char* exclude;
 } janus_audiobridge_file;
 /* Helper method to open an Opus file, and make sure it's valid */
 static int janus_audiobridge_file_init(janus_audiobridge_file *ctx) {
@@ -1289,6 +1293,8 @@ static void janus_audiobridge_file_free(janus_audiobridge_file *ctx) {
 	if(ctx->headers > 0)
 		ogg_stream_clear(&ctx->stream);
 	ogg_sync_clear(&ctx->sync);
+	g_free(ctx->to);
+	g_free(ctx->exclude);
 	g_free(ctx);
 }
 #endif
@@ -4188,6 +4194,13 @@ static json_t *janus_audiobridge_process_synchronous_request(janus_audiobridge_s
 			g_snprintf(error_cause, 512, "Error creating Opus decoder");
 			goto prepare_response;
 		}
+
+		json_t *to = json_object_get(root, "to");
+		p->annc->to = g_strdup(json_string_value(to));
+
+		json_t *exclude = json_object_get(root, "exclude");
+		p->annc->exclude = g_strdup(json_string_value(exclude));
+
 		/* We're done, add the announcement to the room */
 		g_hash_table_insert(audiobridge->anncs, g_strdup(p->user_id_str), p);
 		janus_mutex_unlock(&audiobridge->mutex);
@@ -6650,16 +6663,35 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 						gateway->notify_event(&janus_audiobridge_plugin, NULL, info);
 					}
 				}
-				for(i=0; i<samples; i++) {
-					if(p->volume_gain == 100) {
-						buffer[i] += resampled[i];
-					} else {
-						buffer[i] += (resampled[i]*p->volume_gain)/100;
+
+				if(!p->annc->to) {
+					for(i=0; i<samples; i++) {
+						if(p->volume_gain == 100) {
+							buffer[i] += resampled[i];
+						} else {
+							buffer[i] += (resampled[i]*p->volume_gain)/100;
+						}
 					}
 				}
+
+				if(p->annc->to || p->annc->exclude) {
+					janus_audiobridge_rtp_relay_packet *pkt = g_malloc(sizeof(janus_audiobridge_rtp_relay_packet));
+					pkt->data = g_malloc(sizeof(resampled));
+					memcpy(pkt->data, resampled, sizeof(resampled));
+					pkt->ssrc = 0;
+					pkt->timestamp = 0;
+					pkt->seq_number = 0;
+					pkt->silence = FALSE;
+					pkt->length = read;
+
+					janus_mutex_lock(&p->qmutex);
+					/* Insert packets sorting by sequence number */
+					p->inbuf = g_list_prepend(p->inbuf, pkt);
+					janus_mutex_unlock(&p->qmutex);
+				}
+
 				ps = ps->next;
 			}
-			g_list_free(anncs_list);
 		}
 #endif
 		/* Are we recording the mix? (only do it if there's someone in, though...) */
@@ -6712,6 +6744,47 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 				else
 					sumBuffer[i] = buffer[i] - (curBuffer ? (curBuffer[i]*p->volume_gain)/100 : 0);
 			}
+
+#if HAVE_LIBOGG
+			for(GList *annc = anncs_list; annc; annc = annc->next) {
+				janus_audiobridge_participant *anncp = (janus_audiobridge_participant *)annc->data;
+
+				if(anncp->annc == NULL || g_atomic_int_get(&anncp->destroyed))
+					continue;
+
+				if(!anncp->annc->to && !anncp->annc->exclude)
+					continue; // already mixed
+
+				GList *first = g_list_first(anncp->inbuf);
+				janus_audiobridge_rtp_relay_packet *pkt = (janus_audiobridge_rtp_relay_packet *)(first ? first->data : NULL);
+				curBuffer = (opus_int16 *)((pkt && pkt->length && !pkt->silence) ? pkt->data : NULL);
+				if(!curBuffer)
+					continue;
+
+				const char* to = anncp->annc->to;
+				const char* exclude = anncp->annc->exclude;
+				if(to) {
+					if(0 == g_strcmp0(p->display, to)) {
+						for(i = 0; i < samples; ++i) {
+							if(anncp->volume_gain == 100)
+								sumBuffer[i] += curBuffer[i];
+							else
+								sumBuffer[i] += (curBuffer[i]*anncp->volume_gain)/100;
+						}
+					}
+				} else {
+					if(0 == g_strcmp0(p->display, exclude)) {
+						for(i = 0; i < samples; ++i) {
+							if(anncp->volume_gain == 100)
+								sumBuffer[i] -= curBuffer[i];
+							else
+								sumBuffer[i] -= (curBuffer[i]*anncp->volume_gain)/100;
+						}
+					}
+				}
+			}
+#endif
+
 			for(i=0; i<samples; i++)
 				/* FIXME Smoothen/Normalize instead of truncating? */
 				outBuffer[i] = sumBuffer[i];
@@ -6746,6 +6819,23 @@ static void *janus_audiobridge_mixer_thread(void *data) {
 			janus_refcount_decrease(&p->ref);
 			ps = ps->next;
 		}
+
+#if HAVE_LIBOGG
+		for(GList *annc = anncs_list; annc; annc = annc->next) {
+			janus_audiobridge_participant *anncp = (janus_audiobridge_participant *)annc->data;
+
+			GList *first = g_list_first(anncp->inbuf);
+			if(first) {
+				janus_audiobridge_rtp_relay_packet *pkt = (janus_audiobridge_rtp_relay_packet *)first->data;
+				g_free(pkt->data);
+				g_free(pkt);
+
+				anncp->inbuf = g_list_delete_link(anncp->inbuf, first);
+			}
+		}
+		g_list_free(anncs_list);
+#endif
+
 		g_list_free(participants_list);
 		/* Forward the mixed packet as RTP to any RTP forwarder that may be listening */
 		janus_mutex_lock(&audiobridge->rtp_mutex);
