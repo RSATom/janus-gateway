@@ -6853,6 +6853,11 @@ static void *janus_audiobridge_handler(void *data) {
 				participant->group = group_id;
 			}
 			if(muted || display || (participant->stereo && spatial)) {
+				janus_mutex_lock(&rooms_mutex);
+				janus_audiobridge_room *audiobridge = participant->room;
+				if(audiobridge != NULL) {
+					janus_mutex_lock(&audiobridge->mutex);
+				}
 				if(muted) {
 					participant->muted = json_is_true(muted);
 					JANUS_LOG(LOG_VERB, "Setting muted property: %s (room %s, user %s)\n",
@@ -6891,10 +6896,7 @@ static void *janus_audiobridge_handler(void *data) {
 					participant->spatial_position = spatial_position;
 				}
 				/* Notify all other participants about the mute/unmute */
-				janus_mutex_lock(&rooms_mutex);
-				janus_audiobridge_room *audiobridge = participant->room;
 				if(audiobridge != NULL) {
-					janus_mutex_lock(&audiobridge->mutex);
 					json_t *list = json_array();
 					json_t *pl = json_object();
 					json_object_set_new(pl, "id",
