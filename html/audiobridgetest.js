@@ -315,15 +315,17 @@ $(document).ready(function() {
 									}
 									Janus.attachMediaStream($('#roomaudio').get(0), remoteStream);
 									// Mute button
-									audioenabled = true;
+									audioenabled = false;
 									$('#toggleaudio').click(
 										function() {
 											audioenabled = !audioenabled;
-											if(audioenabled)
+											if(audioenabled) {
 												$('#toggleaudio').html("Mute").removeClass("btn-success").addClass("btn-danger");
-											else
+												mixertest.send({ message: { request: "self-unmute" }});
+											} else {
 												$('#toggleaudio').html("Unmute").removeClass("btn-danger").addClass("btn-success");
-											mixertest.send({ message: { request: "configure", muted: !audioenabled }});
+												mixertest.send({ message: { request: "self-mute" }});
+											}
 										}).removeClass('hide').show();
 									// Spatial position, if enabled
 									$('#position').click(
