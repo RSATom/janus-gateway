@@ -7059,7 +7059,7 @@ static void *janus_audiobridge_handler(void *data) {
 				}
 			}
 
-			mute_participant(session, participant, muting, TRUE, TRUE);
+			mute_participant(session, participant, muting, FALSE, TRUE);
 
 			janus_mutex_unlock(&audiobridge->mutex);
 			janus_mutex_unlock(&rooms_mutex);
