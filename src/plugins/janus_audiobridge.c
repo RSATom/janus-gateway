@@ -7045,7 +7045,26 @@ static void *janus_audiobridge_handler(void *data) {
 				if(now - unmutedParticipant->inbuf_timestamp > PTT_NO_AUDIO_TIMEOUT*G_USEC_PER_SEC) {
 					mute_forced = TRUE;
 					JANUS_LOG(LOG_WARN, "Room \"%s\" already has unmuted but inactive user. Forcing mute...\n", participant->room->room_id_str);
-					mute_participant(session, unmutedParticipant, TRUE, TRUE, FALSE);
+					mute_participant(session, unmutedParticipant, TRUE, FALSE, FALSE);
+
+					// Notify participant about forced mute
+					json_t *participantInfo = json_object();
+					json_object_set_new(participantInfo, "id",
+						string_ids ? json_string(unmutedParticipant->user_id_str) : json_integer(unmutedParticipant->user_id));
+					if(unmutedParticipant->display)
+						json_object_set_new(participantInfo, "display", json_string(unmutedParticipant->display));
+
+					json_t *pub = json_object();
+					json_object_set_new(pub, "audiobridge", json_string("forcibly-muted"));
+					json_object_set_new(pub, "room",
+						string_ids ? json_string(unmutedParticipant->room->room_id_str) : json_integer(unmutedParticipant->room->room_id));
+					json_object_set_new(pub, "participant", participantInfo);
+
+					JANUS_LOG(LOG_VERB, "Notifying participant %s (%s)\n",
+						unmutedParticipant->user_id_str, unmutedParticipant->display ? unmutedParticipant->display : "??");
+					int ret = gateway->push_event(unmutedParticipant->session->handle, &janus_audiobridge_plugin, NULL, pub, NULL);
+					JANUS_LOG(LOG_VERB, "  >> %d (%s)\n", ret, janus_get_api_error(ret));
+					json_decref(pub);
 				}
 				janus_mutex_unlock(&unmutedParticipant->qmutex);
 
