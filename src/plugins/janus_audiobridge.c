@@ -1568,6 +1568,7 @@ typedef struct janus_audiobridge_participant {
 	volatile gint encoding;	/* Whether this participant is currently encoding */
 	volatile gint decoding;	/* Whether this participant is currently decoding */
 	gboolean muted;			/* Whether this participant is muted */
+	gint64 unmuted_timestamp;
 	int volume_gain;		/* Gain to apply to the input audio (in percentage) */
 	int32_t opus_bitrate;	/* Bitrate to use for the Opus stream */
 	int opus_complexity;	/* Complexity to use in the encoder (by default, DEFAULT_COMPLEXITY) */
@@ -3038,7 +3039,9 @@ static void mute_participant(
 		}
 		if(lock_qmutex) janus_mutex_unlock(&participant->qmutex);
 	} else {
+		gint64 now = janus_get_monotonic_time();
 		audiobridge->unmutedParticipant = participant;
+		participant->unmuted_timestamp = now;
 	}
 
 	/* Notify all other participants about the mute/unmute */
@@ -7042,7 +7045,7 @@ static void *janus_audiobridge_handler(void *data) {
 				struct janus_audiobridge_participant* unmutedParticipant = audiobridge->unmutedParticipant;
 				janus_mutex_lock(&unmutedParticipant->qmutex);
 				gint64 now = janus_get_monotonic_time();
-				if(now - unmutedParticipant->inbuf_timestamp > PTT_NO_AUDIO_TIMEOUT*G_USEC_PER_SEC) {
+				if(now - MAX(unmutedParticipant->inbuf_timestamp, unmutedParticipant->unmuted_timestamp) > PTT_NO_AUDIO_TIMEOUT*G_USEC_PER_SEC) {
 					mute_forced = TRUE;
 					JANUS_LOG(LOG_WARN, "Room \"%s\" already has unmuted but inactive user. Forcing mute...\n", participant->room->room_id_str);
 					mute_participant(session, unmutedParticipant, TRUE, FALSE, FALSE);
